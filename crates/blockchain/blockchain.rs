@@ -1664,7 +1664,7 @@ impl Blockchain {
             })
             .collect();
         let state_trie_root = if let NodeRef::Node(state_trie_root, _) =
-            Trie::get_embedded_root(&nodes, initial_state_root)?
+            Trie::get_embedded_root(&nodes, initial_state_root, &NativeCrypto)?
         {
             Some((*state_trie_root).clone())
         } else {
@@ -1691,7 +1691,7 @@ impl Blockchain {
             if !nodes.contains_key(&storage_root_hash) {
                 continue; // storage trie isn't relevant to this execution
             }
-            let node = Trie::get_embedded_root(&nodes, storage_root_hash)?;
+            let node = Trie::get_embedded_root(&nodes, storage_root_hash, &NativeCrypto)?;
             let NodeRef::Node(node, _) = node else {
                 return Err(ChainError::Custom(
                     "execution witness does not contain non-empty storage trie".to_string(),
@@ -1898,7 +1898,7 @@ impl Blockchain {
             })
             .collect();
         let state_trie_root = if let NodeRef::Node(state_trie_root, _) =
-            Trie::get_embedded_root(&nodes, initial_state_root)?
+            Trie::get_embedded_root(&nodes, initial_state_root, &NativeCrypto)?
         {
             Some((*state_trie_root).clone())
         } else {
@@ -1925,7 +1925,7 @@ impl Blockchain {
             if !nodes.contains_key(&storage_root_hash) {
                 continue; // storage trie isn't relevant to this execution
             }
-            let node = Trie::get_embedded_root(&nodes, storage_root_hash)?;
+            let node = Trie::get_embedded_root(&nodes, storage_root_hash, &NativeCrypto)?;
             let NodeRef::Node(node, _) = node else {
                 return Err(ChainError::Custom(
                     "execution witness does not contain non-empty storage trie".to_string(),
