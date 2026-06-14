@@ -57,7 +57,34 @@ where
                 .map_err(ExecutionError::GuestProgramState)
         })?;
 
-    let mut wrapped_db = GuestProgramStateWrapper::new(ethrex_guest_program_state, crypto.clone());
+    execute_blocks_with_state(
+        blocks,
+        ethrex_guest_program_state,
+        chain_id,
+        elasticity_multiplier,
+        vm_factory,
+        crypto,
+    )
+}
+
+/// Execute a batch of blocks from an already-built [`GuestProgramState`].
+///
+/// This is the lazy-path counterpart to [`execute_blocks`]. The caller builds the
+/// guest state (for example via [`GuestProgramState::from_rpc_witness`], which
+/// resolves trie nodes lazily by hash) and this runs the same validation and
+/// execution pipeline against it.
+pub fn execute_blocks_with_state<F>(
+    blocks: &[Block],
+    guest_state: GuestProgramState,
+    chain_id: u64,
+    elasticity_multiplier: u64,
+    vm_factory: F,
+    crypto: Arc<dyn Crypto + Send + Sync>,
+) -> Result<BatchExecutionResult, ExecutionError>
+where
+    F: Fn(&GuestProgramStateWrapper, usize) -> Result<Evm, ExecutionError>,
+{
+    let mut wrapped_db = GuestProgramStateWrapper::new(guest_state, crypto.clone());
 
     let chain_config = wrapped_db.get_chain_config().map_err(|_| {
         ExecutionError::Internal("No chain config in execution witness".to_string())

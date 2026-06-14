@@ -13,6 +13,15 @@ pub type NodeMap = Arc<Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>;
 
 pub trait TrieDB: Send + Sync {
     fn get(&self, key: Nibbles) -> Result<Option<Vec<u8>>, TrieError>;
+    /// Resolve a node directly by its keccak hash.
+    ///
+    /// Hash-keyed witness databases used by the stateless guest implement this so
+    /// trie traversal can follow `NodeRef::Hash` children without a path-keyed
+    /// lookup. Path-keyed databases return `None` and resolution falls back to
+    /// the path lookup.
+    fn get_by_hash(&self, _hash: H256) -> Option<Arc<Node>> {
+        None
+    }
     fn put_batch(&self, key_values: Vec<(Nibbles, Vec<u8>)>) -> Result<(), TrieError>;
     // TODO: replace putbatch with this function.
     fn put_batch_no_alloc(&self, key_values: &[(Nibbles, Node)]) -> Result<(), TrieError> {
@@ -122,5 +131,38 @@ impl TrieDB for InMemoryTrieDB {
         }
 
         Ok(())
+    }
+}
+
+/// Hash-keyed, read-only [`TrieDB`] backed by the flat witness node bag.
+///
+/// The stateless guest indexes witness nodes by their keccak hash. Trie
+/// traversal resolves `NodeRef::Hash` children through [`TrieDB::get_by_hash`],
+/// so nodes are decoded into the map once and shared by `Arc`, and nodes the
+/// execution never reaches are never embedded, cloned, or walked. The map is
+/// shared (via `Arc`) by the state trie and every storage trie, since node
+/// hashes are globally unique.
+#[derive(Clone)]
+pub struct WitnessTrieDB {
+    nodes: Arc<FxHashMap<H256, Arc<Node>>>,
+}
+
+impl WitnessTrieDB {
+    pub fn new(nodes: Arc<FxHashMap<H256, Arc<Node>>>) -> Self {
+        Self { nodes }
+    }
+}
+
+impl TrieDB for WitnessTrieDB {
+    fn get(&self, _key: Nibbles) -> Result<Option<Vec<u8>>, TrieError> {
+        Ok(None)
+    }
+
+    fn put_batch(&self, _key_values: Vec<(Nibbles, Vec<u8>)>) -> Result<(), TrieError> {
+        Ok(())
+    }
+
+    fn get_by_hash(&self, hash: H256) -> Option<Arc<Node>> {
+        self.nodes.get(&hash).cloned()
     }
 }

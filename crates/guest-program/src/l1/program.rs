@@ -8,6 +8,8 @@ use ethrex_crypto::Crypto;
 
 use crate::common::ExecutionError;
 use crate::common::execute_blocks;
+#[cfg(feature = "eip-8025")]
+use crate::common::execute_blocks_with_state;
 use crate::l1::input::ProgramInput;
 #[cfg(feature = "eip-8025")]
 use crate::l1::input::{
@@ -135,6 +137,29 @@ pub fn execute_decoded(
             let chain_id = execution_witness.chain_config.chain_id;
             let valid =
                 validate_eip8025_execution(&new_payload_request, execution_witness, crypto).is_ok();
+
+            Ok(ProgramOutput {
+                new_payload_request_root: request_root,
+                valid,
+                chain_id,
+            })
+        }
+        ProgramInput::Wire(DecodedEip8025::LegacyLazy {
+            new_payload_request,
+            rpc_witness,
+            chain_config,
+            first_block_number,
+        }) => {
+            let request_root = new_payload_request.hash_tree_root(&CryptoWrapper(crypto.clone()));
+            let chain_id = chain_config.chain_id;
+            let valid = validate_eip8025_execution_lazy(
+                &new_payload_request,
+                rpc_witness,
+                chain_config,
+                first_block_number,
+                crypto,
+            )
+            .is_ok();
 
             Ok(ProgramOutput {
                 new_payload_request_root: request_root,
@@ -562,6 +587,60 @@ fn validate_eip8025_execution(
     let _result = execute_blocks(
         &[block],
         execution_witness,
+        ELASTICITY_MULTIPLIER,
+        |db, _| Ok(Evm::new_for_l1(db.clone(), crypto.clone())),
+        crypto.clone(),
+    )?;
+
+    Ok(())
+}
+
+/// Lazy counterpart to [`validate_eip8025_execution`]: builds the guest state
+/// directly from the flat RPC witness via
+/// [`GuestProgramState::from_rpc_witness`], resolving trie nodes by hash on
+/// access instead of eagerly embedding the trie.
+#[cfg(feature = "eip-8025")]
+fn validate_eip8025_execution_lazy(
+    new_payload_request: &ethrex_common::types::eip8025_ssz::NewPayloadRequest,
+    rpc_witness: ethrex_common::types::block_execution_witness::RpcExecutionWitness,
+    chain_config: ethrex_common::types::ChainConfig,
+    first_block_number: u64,
+    crypto: Arc<dyn Crypto>,
+) -> Result<(), ExecutionError> {
+    use ethrex_common::types::block_execution_witness::{
+        GuestProgramState, decode_witness_headers, validate_witness_headers_chain,
+    };
+
+    let block = new_payload_request_to_block(new_payload_request, crypto.as_ref())
+        .map_err(|e| ExecutionError::Internal(format!("payload conversion: {e}")))?;
+
+    validate_reconstructed_block_hash(
+        &block,
+        &new_payload_request.execution_payload.block_hash,
+        crypto.as_ref(),
+    )
+    .map_err(|e| ExecutionError::Internal(format!("payload conversion: {e}")))?;
+
+    validate_versioned_hashes(&block, new_payload_request.versioned_hashes.iter())?;
+
+    // Decode headers once; reused by the chain-linkage check and the lazy build.
+    let decoded_headers = decode_witness_headers(&rpc_witness.headers)?;
+    validate_witness_headers_chain(&decoded_headers, crypto.as_ref())?;
+
+    let chain_id = chain_config.chain_id;
+    let guest_state = GuestProgramState::from_rpc_witness(
+        rpc_witness,
+        chain_config,
+        first_block_number,
+        &decoded_headers,
+        crypto.as_ref(),
+    )
+    .map_err(ExecutionError::GuestProgramState)?;
+
+    let _result = execute_blocks_with_state(
+        &[block],
+        guest_state,
+        chain_id,
         ELASTICITY_MULTIPLIER,
         |db, _| Ok(Evm::new_for_l1(db.clone(), crypto.clone())),
         crypto.clone(),

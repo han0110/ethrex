@@ -186,6 +186,21 @@ impl NodeRef {
             NodeRef::Hash(hash @ NodeHash::Inline(_)) => {
                 Ok(Some(Arc::new(Node::decode(hash.as_ref())?)))
             }
+            // Hash-keyed witness databases (lazy stateless guest path) resolve the
+            // child directly by its hash; this arm only exists under `eip-8025`, so
+            // the full-node build below is byte-for-byte the original path-keyed
+            // resolution with no added call or branch.
+            #[cfg(feature = "eip-8025")]
+            NodeRef::Hash(NodeHash::Hashed(hash)) => {
+                if let Some(node) = db.get_by_hash(*hash) {
+                    return Ok(Some(node));
+                }
+                db.get(path)?
+                    .filter(|rlp| !rlp.is_empty())
+                    .map(|rlp| Ok(Arc::new(Node::decode(&rlp)?)))
+                    .transpose()
+            }
+            #[cfg(not(feature = "eip-8025"))]
             NodeRef::Hash(_) => db
                 .get(path)?
                 .filter(|rlp| !rlp.is_empty())
@@ -243,15 +258,44 @@ impl NodeRef {
                 self.get_node_mut(db, path)
             }
             NodeRef::Hash(hash @ NodeHash::Hashed(_)) => {
-                let Some(node) = db
-                    .get(path.clone())?
-                    .filter(|rlp| !rlp.is_empty())
-                    .map(|rlp| Node::decode(&rlp).map_err(TrieError::RLPDecode))
-                    .transpose()?
-                else {
-                    return Ok(None);
+                let node_hash = *hash;
+                // Resolve through the hash-keyed witness database when available
+                // (lazy stateless guest path, `eip-8025` only); the node is shared
+                // via `Arc`, so the subsequent `Arc::make_mut` copies it on write,
+                // leaving the shared witness copy intact. Without `eip-8025` this is
+                // the original path-keyed resolution with no added call or branch.
+                #[cfg(feature = "eip-8025")]
+                let node_arc = {
+                    let NodeHash::Hashed(h256) = node_hash else {
+                        unreachable!("matched NodeHash::Hashed")
+                    };
+                    if let Some(node) = db.get_by_hash(h256) {
+                        node
+                    } else {
+                        let Some(node) = db
+                            .get(path.clone())?
+                            .filter(|rlp| !rlp.is_empty())
+                            .map(|rlp| Node::decode(&rlp).map_err(TrieError::RLPDecode))
+                            .transpose()?
+                        else {
+                            return Ok(None);
+                        };
+                        Arc::new(node)
+                    }
                 };
-                *self = NodeRef::Node(Arc::new(node), OnceLock::from(*hash));
+                #[cfg(not(feature = "eip-8025"))]
+                let node_arc = {
+                    let Some(node) = db
+                        .get(path.clone())?
+                        .filter(|rlp| !rlp.is_empty())
+                        .map(|rlp| Node::decode(&rlp).map_err(TrieError::RLPDecode))
+                        .transpose()?
+                    else {
+                        return Ok(None);
+                    };
+                    Arc::new(node)
+                };
+                *self = NodeRef::Node(node_arc, OnceLock::from(node_hash));
                 self.get_node_mut(db, path)
             }
         }

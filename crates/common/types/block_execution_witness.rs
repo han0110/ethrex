@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
@@ -14,7 +15,7 @@ use ethereum_types::{Address, H256, U256};
 use ethrex_crypto::Crypto;
 use ethrex_rlp::error::RLPDecodeError;
 use ethrex_rlp::{decode::RLPDecode, encode::RLPEncode};
-use ethrex_trie::{EMPTY_TRIE_HASH, Nibbles, Node, NodeRef, Trie, TrieError};
+use ethrex_trie::{EMPTY_TRIE_HASH, Nibbles, Node, NodeRef, Trie, TrieError, WitnessTrieDB};
 use rkyv::with::{Identity, MapKV};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,11 @@ pub struct GuestProgramState {
     /// verified.
     /// Verification is done by hashing the trie and comparing the root hash with the account's storage root.
     pub verified_storage_roots: BTreeMap<H256, bool>,
+    /// Flat witness node bag indexed by keccak hash, present only on the lazy
+    /// canonical path built via [`GuestProgramState::from_rpc_witness`]. Storage
+    /// tries are opened on demand against this shared map instead of being
+    /// embedded and collected up front. `None` on the legacy embedded path.
+    pub witness_nodes: Option<Arc<FxHashMap<H256, Arc<Node>>>>,
 }
 
 /// Witness data produced by the client and consumed by the guest program
@@ -431,6 +437,87 @@ impl GuestProgramState {
             chain_config: value.chain_config,
             account_hashes_by_address: BTreeMap::new(),
             verified_storage_roots: BTreeMap::new(),
+            witness_nodes: None,
+        })
+    }
+
+    /// Builds the guest state directly from the flat RPC witness, resolving trie
+    /// nodes lazily by hash instead of eagerly embedding the whole trie.
+    ///
+    /// The only full pass over the witness is decoding each node and indexing it
+    /// by its keccak hash; that index is the authentication root. The state trie
+    /// is opened at the trusted parent state root with its nodes resolved on
+    /// access (each fetch matches the parent's expected child hash, chaining from
+    /// the trusted root), so `get_embedded_root`, the deep `Node` clones, the
+    /// separate account-collection walk, and the eager hash pass are all avoided.
+    /// Storage tries are opened on demand in `get_valid_storage_trie` and
+    /// `apply_account_updates` against the same shared node map.
+    pub fn from_rpc_witness(
+        rpc: RpcExecutionWitness,
+        chain_config: ChainConfig,
+        first_block_number: u64,
+        decoded_headers: &[BlockHeader],
+        crypto: &dyn Crypto,
+    ) -> Result<Self, GuestProgramStateError> {
+        let initial_state_root = find_parent_state_root(decoded_headers, first_block_number)?;
+
+        // Drop the `0x80` Null-node sentinel; undecodable nodes are ignored, the
+        // same as the embedded path. Missing needed nodes surface later as
+        // `RootNotFound`/`InconsistentTree` when traversal cannot resolve a hash.
+        let nodes: FxHashMap<H256, Arc<Node>> = rpc
+            .state
+            .into_iter()
+            .filter_map(|b| {
+                if b == Bytes::from_static(&[0x80]) {
+                    return None;
+                }
+                let node = Node::decode(&b).ok()?;
+                Some((H256(crypto.keccak256(&b)), Arc::new(node)))
+            })
+            .collect();
+        let nodes = Arc::new(nodes);
+
+        let state_trie = Trie::open(
+            Box::new(WitnessTrieDB::new(nodes.clone())),
+            initial_state_root,
+        );
+
+        let block_headers: BTreeMap<u64, BlockHeader> = decoded_headers
+            .iter()
+            .cloned()
+            .map(|header| (header.number, header))
+            .collect();
+
+        let parent_number =
+            first_block_number
+                .checked_sub(1)
+                .ok_or(GuestProgramStateError::Custom(
+                    "First block number cannot be zero".to_string(),
+                ))?;
+        let parent_header = block_headers.get(&parent_number).cloned().ok_or(
+            GuestProgramStateError::MissingParentHeaderOf(first_block_number),
+        )?;
+
+        let codes_hashed = rpc
+            .codes
+            .into_iter()
+            .map(|code| {
+                let code = Code::from_bytecode(code, crypto);
+                (code.hash, code)
+            })
+            .collect();
+
+        Ok(GuestProgramState {
+            codes_hashed,
+            state_trie,
+            storage_tries: BTreeMap::new(),
+            block_headers,
+            parent_block_header: parent_header,
+            first_block_number,
+            chain_config,
+            account_hashes_by_address: BTreeMap::new(),
+            verified_storage_roots: BTreeMap::new(),
+            witness_nodes: Some(nodes),
         })
     }
 }
@@ -460,6 +547,9 @@ impl GuestProgramState {
                     Some(encoded_state) => AccountState::decode(&encoded_state)?,
                     None => AccountState::default(),
                 };
+                // The account's storage root as stored before this update, used to
+                // lazily open its storage trie from the witness node bag below.
+                let prev_storage_root = account_state.storage_root;
                 if update.removed_storage {
                     account_state.storage_root = *EMPTY_TRIE_HASH;
                 }
@@ -474,6 +564,22 @@ impl GuestProgramState {
                 }
                 // Store the added storage in the account's storage trie and compute its new root
                 if !update.added_storage.is_empty() {
+                    // Lazy canonical path: if the account already had storage that
+                    // execution never read (so it was never opened in
+                    // `get_valid_storage_trie`), open it now from the witness node
+                    // bag at its pre-update root. Without this, `or_default` would
+                    // start from an empty trie and drop the untouched slots,
+                    // corrupting the post-state root. A wiped account
+                    // (`removed_storage`) correctly starts empty.
+                    if !self.storage_tries.contains_key(&hashed_address)
+                        && !update.removed_storage
+                        && prev_storage_root != *EMPTY_TRIE_HASH
+                        && let Some(nodes) = self.witness_nodes.clone()
+                    {
+                        let trie =
+                            Trie::open(Box::new(WitnessTrieDB::new(nodes)), prev_storage_root);
+                        self.storage_tries.insert(hashed_address, trie);
+                    }
                     let storage_trie = self.storage_tries.entry(hashed_address).or_default();
 
                     // Inserts must come before deletes, otherwise deletes might require extra nodes
@@ -720,6 +826,19 @@ impl GuestProgramState {
                 // empty account
                 return Ok(None);
             };
+            // Lazy canonical path: open the storage trie from the shared witness
+            // node bag at the account's authenticated storage root on first
+            // access. The root hash comes from the (authenticated) account state
+            // and its nodes resolve by keccak match, so the trie is authenticated
+            // on access. `hash_no_commit` on the freshly opened `Hash` root returns
+            // `storage_root` without walking, so the check below stays cheap.
+            if !self.storage_tries.contains_key(&hashed_address)
+                && storage_root != *EMPTY_TRIE_HASH
+                && let Some(nodes) = self.witness_nodes.clone()
+            {
+                let trie = Trie::open(Box::new(WitnessTrieDB::new(nodes)), storage_root);
+                self.storage_tries.insert(hashed_address, trie);
+            }
             let storage_trie = match self.storage_tries.get(&hashed_address) {
                 None if storage_root == *EMPTY_TRIE_HASH => return Ok(None),
                 Some(trie) if trie.hash_no_commit(crypto) == storage_root => trie,

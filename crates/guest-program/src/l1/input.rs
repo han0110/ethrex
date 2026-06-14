@@ -212,6 +212,15 @@ pub enum DecodedEip8025 {
         new_payload_request: ethrex_common::types::eip8025_ssz::NewPayloadRequest,
         execution_witness: ExecutionWitness,
     },
+    /// Lazy legacy framing: carries the flat RPC witness so the guest state is
+    /// built by [`GuestProgramState::from_rpc_witness`], resolving trie nodes by
+    /// hash on access instead of eagerly embedding the trie.
+    LegacyLazy {
+        new_payload_request: ethrex_common::types::eip8025_ssz::NewPayloadRequest,
+        rpc_witness: ethrex_common::types::block_execution_witness::RpcExecutionWitness,
+        chain_config: ethrex_common::types::ChainConfig,
+        first_block_number: u64,
+    },
     /// Canonical-input framing (`version = 0x01`).
     Canonical {
         stateless_input: CanonicalStatelessInput,
@@ -224,6 +233,7 @@ impl core::fmt::Debug for DecodedEip8025 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             DecodedEip8025::Legacy { .. } => f.write_str("DecodedEip8025::Legacy"),
+            DecodedEip8025::LegacyLazy { .. } => f.write_str("DecodedEip8025::LegacyLazy"),
             DecodedEip8025::Canonical { .. } => f.write_str("DecodedEip8025::Canonical"),
         }
     }

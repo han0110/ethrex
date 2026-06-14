@@ -21,7 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-pub use self::db::{InMemoryTrieDB, TrieDB};
+pub use self::db::{InMemoryTrieDB, TrieDB, WitnessTrieDB};
 pub use self::logger::{TrieLogger, TrieWitness};
 pub use self::nibbles::Nibbles;
 pub use self::threadpool::ThreadPool;
@@ -114,19 +114,40 @@ impl Trie {
             return Ok(Some(value_rlp));
         }
 
-        Ok(match self.root {
-            NodeRef::Node(ref node, _) => node.get(self.db.as_ref(), path)?,
-            NodeRef::Hash(hash) if hash.is_valid() => {
-                Node::decode(&self.db.get(Nibbles::default())?.ok_or_else(|| {
-                    TrieError::InconsistentTree(Box::new(InconsistentTreeError::RootNotFound(
-                        hash.finalize(&NativeCrypto),
-                    )))
-                })?)
-                .map_err(TrieError::RLPDecode)?
-                .get(self.db.as_ref(), path)?
+        // Lazy stateless guest path (`eip-8025`): resolve the root through
+        // `get_node` so a hash-keyed witness database can follow the root by hash.
+        #[cfg(feature = "eip-8025")]
+        {
+            if !self.root.is_valid() {
+                return Ok(None);
             }
-            _ => None,
-        })
+            match self.root.get_node(self.db.as_ref(), Nibbles::default())? {
+                Some(root_node) => root_node.get(self.db.as_ref(), path),
+                None => Err(TrieError::InconsistentTree(Box::new(
+                    InconsistentTreeError::RootNotFound(
+                        self.root.compute_hash(&NativeCrypto).finalize(&NativeCrypto),
+                    ),
+                ))),
+            }
+        }
+
+        // Full-node path: the original root resolution, unchanged.
+        #[cfg(not(feature = "eip-8025"))]
+        {
+            Ok(match self.root {
+                NodeRef::Node(ref node, _) => node.get(self.db.as_ref(), path)?,
+                NodeRef::Hash(hash) if hash.is_valid() => {
+                    Node::decode(&self.db.get(Nibbles::default())?.ok_or_else(|| {
+                        TrieError::InconsistentTree(Box::new(InconsistentTreeError::RootNotFound(
+                            hash.finalize(&NativeCrypto),
+                        )))
+                    })?)
+                    .map_err(TrieError::RLPDecode)?
+                    .get(self.db.as_ref(), path)?
+                }
+                _ => None,
+            })
+        }
     }
 
     /// Insert an RLP-encoded value into the trie.
