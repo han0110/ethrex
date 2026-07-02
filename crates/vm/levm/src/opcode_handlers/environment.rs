@@ -423,11 +423,10 @@ impl OpcodeHandler for OpReturnDataCopyHandler {
                 len,
             )?)?;
 
-        #[expect(
-            clippy::arithmetic_side_effects,
-            reason = "src_offset and len are validated by memory expansion"
-        )]
-        if src_offset + len > vm.current_call_frame.sub_return_data.len() {
+        if src_offset
+            .checked_add(len)
+            .is_none_or(|end| end > vm.current_call_frame.sub_return_data.len())
+        {
             return Err(ExceptionalHalt::OutOfBounds.into());
         }
 
