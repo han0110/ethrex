@@ -5,7 +5,7 @@ use crate::{
     errors::{ExceptionalHalt, InternalError, VMError},
 };
 use ExceptionalHalt::OutOfBounds;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use ethrex_common::{
     U256,
     utils::{u256_from_big_endian_const, u256_to_big_endian},
@@ -157,6 +157,35 @@ impl Memory {
                 true_offset..(true_offset.wrapping_add(size)),
             )))
         }
+    }
+
+    /// Like [`Memory::load_range`], but clears and fills `dst` instead of allocating a new
+    /// buffer, so callers can reuse one allocation across calls.
+    #[inline]
+    pub fn load_range_into(
+        &mut self,
+        offset: usize,
+        size: usize,
+        dst: &mut BytesMut,
+    ) -> Result<(), VMError> {
+        dst.clear();
+        if size == 0 {
+            return Ok(());
+        }
+
+        let new_size = offset.checked_add(size).ok_or(OutOfBounds)?;
+        self.resize(new_size)?;
+
+        let true_offset = offset.wrapping_add(self.current_base);
+
+        let buf = self.buffer.borrow();
+
+        // SAFETY: resize already makes sure bounds are correct.
+        #[allow(unsafe_code)]
+        unsafe {
+            dst.extend_from_slice(buf.get_unchecked(true_offset..(true_offset.wrapping_add(size))));
+        }
+        Ok(())
     }
 
     /// Borrow `size` bytes from the given offset and pass them to `f`, without

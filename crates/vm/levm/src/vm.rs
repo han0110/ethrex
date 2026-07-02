@@ -24,7 +24,7 @@ use crate::{
     },
     tracing::LevmCallTracer,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use ethrex_common::{
     Address, BigEndianHash, H160, H256, U256,
     tracing::CallType,
@@ -487,6 +487,8 @@ pub struct VM<'a> {
     pub debug_mode: DebugMode,
     /// Pool of reusable stacks to reduce allocations.
     pub stack_pool: Vec<Stack>,
+    /// Pool of reusable message-call calldata buffers to reduce allocations.
+    pub calldata_pool: Vec<BytesMut>,
     /// VM type (L1 or L2 with fee config).
     pub vm_type: VMType,
     /// Whether the top-level call-frame backup must be PRESERVED (deep-cloned) on the
@@ -733,6 +735,7 @@ impl<'a> VM<'a> {
             opcode_tracer: LevmOpcodeTracer::disabled(),
             debug_mode: DebugMode::disabled(),
             stack_pool: Vec::new(),
+            calldata_pool: Vec::new(),
             vm_type,
             preserve_top_level_backup,
             state_gas_used: 0,
@@ -1659,6 +1662,7 @@ impl<'a> VM<'a> {
             opcode_tracer: LevmOpcodeTracer::disabled(),
             debug_mode: DebugMode::disabled(),
             stack_pool: Vec::new(),
+            calldata_pool: Vec::new(),
             vm_type: VMType::L1,
             preserve_top_level_backup: false,
             state_gas_used: 0,
