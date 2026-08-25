@@ -19,7 +19,7 @@
 // imports resolve in either configuration; it is a no-op for host builds.
 extern crate alloc;
 
-#[cfg(any(feature = "ere", feature = "zkvm-interface", feature = "openvm"))]
+#[cfg(any(feature = "ere", feature = "zkvm-interface"))]
 pub mod crypto;
 #[cfg(feature = "ere")]
 pub mod platform;
